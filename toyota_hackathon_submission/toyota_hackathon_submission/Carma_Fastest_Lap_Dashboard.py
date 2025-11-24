@@ -1,5 +1,4 @@
 from pathlib import Path
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,6 +7,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.collections import LineCollection
 from scipy.signal import savgol_filter
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from sklearn.preprocessing import MinMaxScaler
 import track_projection
 
@@ -22,6 +22,22 @@ TOYOTA_GR_DIR = BASE_DIR.parent / "TOYOTA GR"
 
 # Track Configs
 TRACK_CONFIG = {
+    'Barber': {
+        'type': 'gps',
+        'endurance_file': str(TOYOTA_GR_DIR / "barber" / "23_AnalysisEnduranceWithSections_Race 1_Anonymized.CSV"),
+        'telemetry_file': str(TOYOTA_GR_DIR / "barber" / "R1_barber_telemetry_data.csv"),
+        'telemetry_ref_file': str(DATA_DIR / "barber_reference_lap.csv"),
+        'micro_sectors': [
+            ('S1-a', 'IM1a_time'),
+            ('S1-b', 'IM1_time'),
+            ('S2-a', 'IM2a_time'),
+            ('S2-b', 'IM2_time'),
+            ('S3-a', 'IM3a_time'),
+            ('S3-b', 'FL_time')
+        ],
+        'sector_annotations': {}, 
+        'subsection_annotations': {}
+    },
     'COTA': {
         'type': 'pixel',
         'endurance_file': str(TOYOTA_GR_DIR / "COTA" / "Race 1" / "23_AnalysisEnduranceWithSections_Race 1_Anonymized.CSV"),
@@ -47,22 +63,6 @@ TRACK_CONFIG = {
             'S3-a': ((200, 480), 'S3-a'),
             'S3-b': ((80, 450), 'S3-b'),
         }
-    },
-    'Barber': {
-        'type': 'gps',
-        'endurance_file': str(TOYOTA_GR_DIR / "barber" / "23_AnalysisEnduranceWithSections_Race 1_Anonymized.CSV"),
-        'telemetry_file': str(TOYOTA_GR_DIR / "barber" / "R1_barber_telemetry_data.csv"),
-        'telemetry_ref_file': str(DATA_DIR / "barber_reference_lap.csv"),
-        'micro_sectors': [
-            ('S1-a', 'IM1a_time'),
-            ('S1-b', 'IM1_time'),
-            ('S2-a', 'IM2a_time'),
-            ('S2-b', 'IM2_time'),
-            ('S3-a', 'IM3a_time'),
-            ('S3-b', 'FL_time')
-        ],
-        'sector_annotations': {}, 
-        'subsection_annotations': {}
     }
 }
 
@@ -336,10 +336,22 @@ def build_sim_frames(fastest_df: pd.DataFrame, tele_df: pd.DataFrame, car_number
             continue
         tele_car["elapsed_s"] = (tele_car["ts"] - tele_car["ts"].iloc[0]).dt.total_seconds()
         tele_car = tele_car.sort_values("elapsed_s")
-        speed_mask = tele_car["telemetry_name"].str.lower() == "speed"
+        tele_car["telemetry_name_lower"] = tele_car["telemetry_name"].str.lower()
+        speed_mask = tele_car["telemetry_name_lower"] == "speed"
         tele_car["speed_val"] = np.nan
         tele_car.loc[speed_mask, "speed_val"] = tele_car.loc[speed_mask, "telemetry_value"]
         tele_car["speed_val"] = tele_car["speed_val"].ffill().bfill().fillna(0)
+
+        # Throttle (ath/aps) and brake (pbrake_f)
+        thr_mask = tele_car["telemetry_name_lower"].isin(["ath", "aps"])
+        tele_car["throttle_val"] = np.nan
+        tele_car.loc[thr_mask, "throttle_val"] = tele_car.loc[thr_mask, "telemetry_value"]
+        tele_car["throttle_val"] = tele_car["throttle_val"].ffill().bfill()
+
+        brk_mask = tele_car["telemetry_name_lower"] == "pbrake_f"
+        tele_car["brake_val"] = np.nan
+        tele_car.loc[brk_mask, "brake_val"] = tele_car.loc[brk_mask, "telemetry_value"]
+        tele_car["brake_val"] = tele_car["brake_val"].ffill().bfill()
         tele_car["dt"] = tele_car["elapsed_s"].diff().fillna(0)
         tele_car["speed_mps"] = tele_car["speed_val"] * (1000 / 3600)
         tele_car["dist_m"] = (tele_car["speed_mps"] * tele_car["dt"]).cumsum()
@@ -353,13 +365,14 @@ def build_sim_frames(fastest_df: pd.DataFrame, tele_df: pd.DataFrame, car_number
         tele_car["x"] = x
         tele_car["y"] = y
         tele_car["frame"] = tele_car["elapsed_s"].round(1)
-        frames.append(tele_car[["vehicle_number", "frame", "x", "y", "speed_val", "elapsed_s"]])
+        frames.append(tele_car[["vehicle_number", "frame", "x", "y", "speed_val", "elapsed_s", "throttle_val", "brake_val"]])
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
-def simulation_plot(sim_df: pd.DataFrame, polyline: np.ndarray, sector_fracs: tuple):
-    """Plotly animation of fastest-lap telemetry with sector-colored track."""
+
+def simulation_plot(sim_df: pd.DataFrame, polyline: np.ndarray, sector_fracs: tuple, compare_car=None):
+    """Track-only animation of fastest laps."""
     if sim_df.empty or polyline is None:
         return go.Figure()
     track = polyline.copy()
@@ -386,15 +399,15 @@ def simulation_plot(sim_df: pd.DataFrame, polyline: np.ndarray, sector_fracs: tu
     n = len(progress)
     idx1 = max(1, int(round(s1_frac * (n - 1))))
     idx2 = max(idx1 + 1, int(round(s2_frac * (n - 1))))
-    # split segments; keep consistent legend order and ensure S1 stays visible even if short
     segs = [
         ("S1", "#3b82f6", tx[: idx1 + 1], ty[: idx1 + 1]),
         ("S2", "#f59e0b", tx[idx1: idx2 + 1], ty[idx1: idx2 + 1]),
         ("S3", "#10b981", tx[idx2:], ty[idx2:]),
     ]
+
     fig = go.Figure()
     for name, color, sx, sy in segs:
-        fig.add_trace(go.Scatter(x=sx, y=sy, mode="lines", line=dict(color=color, width=3), name=name, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=sx, y=sy, mode="lines", line=dict(color=color, width=2), name=name, hoverinfo="skip"))
 
     smin = float(sim_df["speed_val"].min()) if sim_df["speed_val"].notna().any() else 0
     smax = float(sim_df["speed_val"].max()) if sim_df["speed_val"].notna().any() else 1
@@ -405,7 +418,7 @@ def simulation_plot(sim_df: pd.DataFrame, polyline: np.ndarray, sector_fracs: tu
             x=init["x"],
             y=init["y"],
             mode="markers",
-            marker=dict(size=12, color=init["speed_val"], colorscale="Turbo", showscale=True, cmin=smin, cmax=smax, colorbar=dict(title="Speed (kph)")),
+            marker=dict(size=10, color=init["speed_val"], coloraxis="coloraxis"),
             text=init["vehicle_number"],
             hovertemplate="Car %{text}<br>t=%{customdata[0]:.2f}s<extra></extra>",
             customdata=np.stack([init["elapsed_s"]], axis=1),
@@ -416,42 +429,93 @@ def simulation_plot(sim_df: pd.DataFrame, polyline: np.ndarray, sector_fracs: tu
     car_trace_idx = len(fig.data) - 1
     frames = []
     for frame_val, group in sim_df.groupby("frame"):
+        marker_trace = go.Scatter(
+            x=group["x"],
+            y=group["y"],
+            mode="markers",
+            marker=dict(size=10, color=group["speed_val"], coloraxis="coloraxis"),
+            text=group["vehicle_number"],
+            hovertemplate="Car %{text}<br>t=%{customdata[0]:.2f}s<extra></extra>",
+            customdata=np.stack([group["elapsed_s"]], axis=1),
+            name="Cars",
+            showlegend=False,
+        )
         frames.append(
             go.Frame(
                 name=str(frame_val),
-                data=[
-                    go.Scatter(
-                        x=group["x"],
-                        y=group["y"],
-                        mode="markers",
-                        marker=dict(size=12, color=group["speed_val"], colorscale="Turbo", showscale=False, cmin=smin, cmax=smax),
-                        text=group["vehicle_number"],
-                        hovertemplate="Car %{text}<br>t=%{customdata[0]:.2f}s<extra></extra>",
-                        customdata=np.stack([group["elapsed_s"]], axis=1),
-                        name="Cars",
-                        showlegend=False,
-                    )
-                ],
+                data=[marker_trace],
                 traces=[car_trace_idx],
             )
         )
     fig.frames = frames
+
     fig.update_layout(
-        title="Fastest-lap simulation (raw telemetry driven)",
+        title="Fastest-lap simulation (track)",
         xaxis=dict(showgrid=False, zeroline=False, range=[-0.05, 1.05]),
         yaxis=dict(showgrid=False, zeroline=False, scaleanchor="x", scaleratio=1, range=[-0.05, 1.05]),
         template="plotly_white",
         legend=dict(x=0.82, y=1, bgcolor="rgba(255,255,255,0.15)"),
+        coloraxis=dict(
+            colorscale="Turbo",
+            cmin=smin,
+            cmax=smax,
+            colorbar=dict(title="Speed (kph)", x=1.02, y=0.65, len=0.8),
+        ),
+        height=400,
+        width=600,
+        margin=dict(t=50, b=20, l=20, r=20),
+        uirevision="simplay",
         updatemenus=[
             {
                 "type": "buttons",
                 "buttons": [
-                    {"label": "Play", "method": "animate", "args": [None, {"frame": {"duration": 50, "redraw": True}, "fromcurrent": True}]},
-                    {"label": "Pause", "method": "animate", "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}]},
+                    {"label": "Play", "method": "animate", "args": [None, {"frame": {"duration": 50, "redraw": False}, "fromcurrent": True, "transition": {"duration": 0}, "mode": "immediate"}]},
+                    {"label": "Pause", "method": "animate", "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate", "transition": {"duration": 0}}]},
                 ],
             }
         ],
     )
+    return fig
+
+
+def plot_controls(sim_df: pd.DataFrame, cars_sorted, column: str, y_label: str, title: str):
+    """Render a standalone control plot without a time cursor."""
+    fig = go.Figure()
+    if sim_df.empty or column not in sim_df.columns:
+        fig.update_layout(title=title, template="plotly_white", height=260)
+        return fig
+
+    colors = ["#92c2e4", "#ec8d64", "#2ca02c", "#9467bd"]
+    for idx, car in enumerate(cars_sorted):
+        car_df = sim_df[sim_df["vehicle_number"] == car].sort_values("elapsed_s")
+        fig.add_trace(
+            go.Scatter(
+                x=car_df["elapsed_s"],
+                y=car_df[column],
+                mode="lines",
+                line=dict(color=colors[idx % len(colors)], width=1.8),
+                name=str(car),
+            )
+        )
+
+    y_vals = sim_df[column].dropna()
+    y_min = float(y_vals.min()) if not y_vals.empty else 0
+    y_max = float(y_vals.max()) if not y_vals.empty else 1
+    if y_min == y_max:
+        y_min -= 1
+        y_max += 1
+
+    fig.update_layout(
+        # title=title,
+        xaxis_title="Time (s)",
+        yaxis_title=y_label,
+        template="plotly_white",
+        margin=dict(t=40, b=40, l=40, r=10),
+        height=240,
+        showlegend=True,
+    )
+    fig.update_xaxes(showgrid=True, zeroline=False)
+    fig.update_yaxes(range=[y_min, y_max], showgrid=True, zeroline=False)
     return fig
 
 # ------------------------
@@ -607,10 +671,7 @@ def render_playback_section(analysis_mode, track_name, config, ref_driver, targe
         st.info("Playback not available for this track yet.")
         return
     if track_name != 'Barber':
-        st.info("Playback demo currently wired for Barber telemetry only.")
         return
-
-    st.caption("Load telemetry to drive moving dots and synced plots.")
 
     needs_load = not st.session_state.get('telemetry_loaded') or st.session_state.get('telemetry_track') != track_name
     drivers_mismatch = st.session_state.get('loaded_drivers') != (ref_driver, target_driver)
@@ -650,18 +711,17 @@ def render_playback_section(analysis_mode, track_name, config, ref_driver, targe
         else:
             st.empty()
 
-def render_driver_profile_section(track_name, config):
+def render_driver_profile_section(track_name, config, default_drivers=None, allowed_drivers=None):
     """Driver style profiling via radar and quick metrics (telemetry tracks only)."""
     if not config.get('telemetry_file'):
         st.info("Driver profiling needs telemetry; not available for this track yet.")
         return
-    st.header(f"Driver Profile: {track_name}")
     tele_path = Path(config['telemetry_file'])
     if not tele_path.exists():
         st.warning(f"Telemetry file missing: {tele_path.name}")
         return
-    # Cap Barber to 28 to include laps numbered up to 29 while excluding obvious extras
-    lap_cap = 28 if track_name == "Barber" else None
+    # Cap Barber to 27 (race ran up to lap 27)
+    lap_cap = 27 if track_name == "Barber" else None
     tele_wide = load_telemetry_wide(config['telemetry_file'], lap_cap=lap_cap)
     if tele_wide.empty:
         st.info("No telemetry loaded for profiling (empty file or bad schema).")
@@ -676,43 +736,93 @@ def render_driver_profile_section(track_name, config):
         return
 
     drivers = sorted(radar_scaled.index.tolist())
+    if allowed_drivers:
+        allowed_set = {str(d) for d in allowed_drivers}
+        drivers = [d for d in drivers if str(d) in allowed_set]
+    if not drivers:
+        st.info("No drivers available for profiling with current filters.")
+        return
+
+    default_a, default_b = (default_drivers or (None, None))
+
+    def match_driver(val):
+        return next((d for d in drivers if str(d) == str(val)), None)
+
+    default_a = match_driver(default_a)
+    default_b = match_driver(default_b)
+
+    driver_b_options = ["(none)"] + drivers
+
+    # Seed defaults when they change; otherwise respect user selections
+    last_defaults = st.session_state.get("driver_profile_defaults")
+    if last_defaults != (default_a, default_b):
+        if default_a in drivers:
+            st.session_state["driver_profile_a"] = default_a
+        if default_b in drivers:
+            st.session_state["driver_profile_b"] = default_b
+        elif default_b is None:
+            st.session_state["driver_profile_b"] = "(none)"
+        st.session_state["driver_profile_defaults"] = (default_a, default_b)
+
+    selected_a = st.session_state.get("driver_profile_a", drivers[0] if drivers else None)
+    if selected_a not in drivers:
+        selected_a = drivers[0]
+        st.session_state["driver_profile_a"] = selected_a
+
+    selected_b = st.session_state.get("driver_profile_b", "(none)")
+    if selected_b not in driver_b_options:
+        selected_b = "(none)"
+        st.session_state["driver_profile_b"] = selected_b
+
+    idx_a = drivers.index(st.session_state["driver_profile_a"])
+    idx_b = driver_b_options.index(st.session_state["driver_profile_b"])
+
     c_sel1, c_sel2 = st.columns(2)
     with c_sel1:
-        driver_a = st.selectbox("Driver A", drivers, key="driver_profile_a")
+        driver_a = st.selectbox("Driver A", drivers, index=idx_a, key="driver_profile_a")
     with c_sel2:
-        driver_b = st.selectbox("Driver B (optional compare)", ["(none)"] + drivers, key="driver_profile_b")
+        driver_b = st.selectbox("Driver B (optional compare)", driver_b_options, index=idx_b, key="driver_profile_b")
         driver_b = driver_b if driver_b != "(none)" else None
 
     col_r1, col_r2 = st.columns(2)
     with col_r1:
         laps_a = int(driver_profile.loc[driver_a, "n_laps"]) if driver_a in driver_profile.index else 0
-        st.plotly_chart(build_radar_plot(radar_scaled, radar_features, radar_labels, driver_a, laps_a, color="deepskyblue", title_prefix=""), use_container_width=True)
+        st.plotly_chart(build_radar_plot(radar_scaled, radar_features, radar_labels, driver_a, laps_a, color="deepskyblue", title_prefix=""), width="stretch")
     with col_r2:
         if driver_b:
             laps_b = int(driver_profile.loc[driver_b, "n_laps"]) if driver_b in driver_profile.index else 0
-            st.plotly_chart(build_radar_plot(radar_scaled, radar_features, radar_labels, driver_b, laps_b, color="orangered", title_prefix=""), use_container_width=True)
+            st.plotly_chart(build_radar_plot(radar_scaled, radar_features, radar_labels, driver_b, laps_b, color="orangered", title_prefix=""), width="stretch")
         else:
             st.info("Pick a second driver to compare.")
 
-    # Quick stats table
-    display_cols = ["n_laps", "lap_duration", "speed_max", "throttle_mean", "pct_full_throttle", "pct_brake", "lap_consistency"]
-    stats = driver_profile[display_cols].rename(columns={
-        "n_laps": "Laps",
-        "lap_duration": "Avg Lap (s)",
-        "speed_max": "Max Speed",
-        "throttle_mean": "Avg Throttle",
-        "pct_full_throttle": "Full Throttle %",
-        "pct_brake": "Brake %",
-        "lap_consistency": "Consistency",
+    # Quick stats table (matches radar metrics)
+    stats = pd.DataFrame({
+        "Full Throttle %": driver_profile["pct_full_throttle"],
+        "Brake Time %": driver_profile["pct_brake"],
+        "Max Lateral G": driver_profile["accy_max"],
+        "Steering Variability": driver_profile["steer_std"],
+        "Max Brake G": -driver_profile["max_brake_g"],  # convert to positive magnitude
+        "Lap Consistency": driver_profile["lap_consistency"],
     })
     st.dataframe(stats.style.format({
-        "Avg Lap (s)": "{:.2f}",
-        "Max Speed": "{:.1f}",
-        "Avg Throttle": "{:.1f}",
         "Full Throttle %": "{:.0%}",
-        "Brake %": "{:.0%}",
-        "Consistency": "{:.3f}",
-    }), use_container_width=True, height=260)
+        "Brake Time %": "{:.0%}",
+        "Max Lateral G": "{:.2f}",
+        "Steering Variability": "{:.2f}",
+        "Max Brake G": "{:.2f}",
+        "Lap Consistency": "{:.3f}",
+    }), width="stretch", height=260)
+    st.markdown(
+        """
+        **Radar metric notes**
+        - Full throttle %: Time on throttle > 90% as a share of the lap. count(pthrottle_f > 90) / count(pthrottle_f samples).
+        - Brake time %: Time on the brakes (> 5 bar) as a share of the lap. count(pbrake_f > 5) / count(pbrake_f samples).
+        - Max lateral G: Peak cornering load measured on the lateral axis. max(accy_can).
+        - Steering variability: How much the wheel is being worked (steering std dev). stddev(steering_angle).
+        - Max brake G: Hardest braking hit (peak decel magnitude). max(-accx_can) for decel magnitude.
+        - Lap consistency: Repeatability of lap times; higher = steadier laps. 1 / (1 + stddev(lap_duration)).
+        """
+    )
 
 # COTA Detailed Points (Hardcoded)
 COTA_FULL_POINTS = {
@@ -889,6 +999,7 @@ def load_telemetry_wide(file_path, lap_cap=None):
     tele = tele[tele["vehicle_number"] != "000"]
     tele["meta_time"] = pd.to_datetime(tele["meta_time"])
     tele["timestamp"] = pd.to_datetime(tele["timestamp"])
+    tele["telemetry_name"] = tele["telemetry_name"].str.lower()
     tele = tele.sort_values(["vehicle_number", "meta_time"])
 
     tele_wide = (
@@ -922,14 +1033,16 @@ def compute_lap_features(tele_wide: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
     def pct_full_throttle(series):
         if throttle_col is None:
             return np.nan
-        vals = pd.to_numeric(series, errors="coerce")
-        return (vals > 90).mean()
+        vals = pd.to_numeric(series, errors="coerce").dropna()
+        return (vals > 90).mean() if not vals.empty else np.nan
 
     def throttle_mean(series):
         if throttle_col is None:
             return np.nan
-        vals = pd.to_numeric(series, errors="coerce")
-        return vals.mean()
+        vals = pd.to_numeric(series, errors="coerce").dropna()
+        return vals.mean() if not vals.empty else np.nan
+
+    steer_col = "steering_angle" if "steering_angle" in tele_wide.columns else "Steering_Angle"
 
     agg_map = dict(
         lap_start=("meta_time", "min"),
@@ -938,9 +1051,9 @@ def compute_lap_features(tele_wide: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         speed_mean=("speed", "mean"),
         speed_max=("speed", "max"),
         brake_f_mean=("pbrake_f", "mean"),
-        pct_brake=("pbrake_f", lambda x: (pd.to_numeric(x, errors="coerce") > 5).mean()),
+        pct_brake=("pbrake_f", lambda x: (pd.to_numeric(x, errors="coerce").dropna() > 5).mean() if pd.to_numeric(x, errors="coerce").notna().any() else np.nan),
         accy_max=("accy_can", "max"),
-        steer_std=("Steering_Angle", "std"),
+        steer_std=(steer_col, "std"),
         max_brake_g=("accx_can", "min"),
     )
     if throttle_col:
@@ -1372,7 +1485,7 @@ def plot_dual_speed_map(ref_df, target_df, ref_driver, target_driver):
     # Actually, simpler to just have the legend explain the colors.
     # But we can add a small colorbar for one of them to show the scale.
     cbar = fig.colorbar(lc_target, ax=ax, pad=0.02)
-    cbar.set_label("Speed Intensity (Dark=Slow, Bright=Fast)", color='white')
+    cbar.set_label("Speed (kph)", color='white')
     cbar.ax.yaxis.set_tick_params(color='white')
     plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
     
@@ -1998,9 +2111,8 @@ def main():
                 if delta_df is not None:
                     st.pyplot(plot_map(delta_df, centerline_points, sector_indices, track_name, target_driver, ref_driver, config['sector_annotations'], config['subsection_annotations']))
 
-        # Fastest-lap Simulation (telemetry-driven playback)
-        st.divider()
-        st.subheader("Fastest-lap Simulation")
+    # --- Tab Playback: Moving dots + synced plots ---
+    with tab_playback:
         fastest_sim, tele_sim, track_poly = load_fastest_assets(track_name)
         if fastest_sim.empty or tele_sim.empty or track_poly is None:
             st.info("Simulation data not available for this track.")
@@ -2011,7 +2123,7 @@ def main():
             if set(["S1_SEC", "S2_SEC", "S3_SEC"]).issubset(fastest_sim.columns):
                 candidate = fastest_sim[
                     fastest_sim["CAR_NUMBER"].isin(cars)
-                    & fastest_sim[["S1_SEC", "S2_SEC", "S3_SEC"]].applymap(np.isfinite).all(axis=1)
+                    & fastest_sim[["S1_SEC", "S2_SEC", "S3_SEC"]].map(np.isfinite).all(axis=1)
                 ].head(1)
                 if not candidate.empty:
                     total = candidate[["S1_SEC", "S2_SEC", "S3_SEC"]].iloc[0].sum()
@@ -2029,20 +2141,32 @@ def main():
                 fig = simulation_plot(sim_df, track_poly, (s1_frac, s2_frac))
                 st.plotly_chart(fig, width="stretch")
 
-    # --- Tab Playback: Moving dots + synced plots ---
-    with tab_playback:
-        render_playback_section(analysis_mode, track_name, config, ref_driver, target_driver, ref_row, target_row, ref_lap_num, target_lap_num)
+                # Static throttle/brake traces (no cursor) — hidden for Barber
+                if track_name != 'Barber':
+                    cars_sorted = sim_df["vehicle_number"].unique().tolist()
+                    st.plotly_chart(plot_controls(sim_df, cars_sorted, "throttle_val", "Throttle (%)", "Throttle"), width="stretch")
+                    st.plotly_chart(plot_controls(sim_df, cars_sorted, "brake_val", "Brake (bar)", "Brake"), width="stretch")
+            
+        if track_name == 'Barber':
+            st.subheader("Playback using GPS Data")
+            render_playback_section(analysis_mode, track_name, config, ref_driver, target_driver, ref_row, target_row, ref_lap_num, target_lap_num)
 
     # --- Tab Driver Profile: Radar + stats ---
     with tab_profile:
-        render_driver_profile_section(track_name, config)
+        if analysis_mode == "Head-to-Head":
+            defaults = (target_driver, ref_driver)
+        else:  # Driver vs. Fastest Lap
+            defaults = (ref_driver, target_driver)
+        render_driver_profile_section(track_name, config, default_drivers=defaults, allowed_drivers=driver_numbers)
 
     # --- Tab 2: Advanced Insights (Exact match to barber_insights.py) ---
     with tab2:
-        if config['telemetry_file']:
+        if track_name != "Barber":
+            st.info("Advanced telemetry analysis is available for Barber only.")
+        elif config['telemetry_file']:
             st.header(f"Advanced Insights: {track_name}")
             st.markdown("Actionable insights: Heatmaps, Racing Lines, and Coasting Detection.")
-            
+            st.markdown("If changing drivers, please reload the telemetry data.")
             # Show selected laps
             st.info(f"Analyzing: Driver {target_driver} (Lap {target_lap_num}) vs Reference {ref_driver} (Lap {ref_lap_num})")
             
@@ -2157,7 +2281,7 @@ def main():
 
 
                 # 2. Heatmaps
-                st.header("3. Telemetry Heatmaps")
+                st.header("2. Telemetry Heatmaps")
                 st.info("Select a metric to visualize its intensity around the track. Red/Yellow = High, Blue/Purple = Low.")
                 
                 heatmap_metric = st.selectbox(
@@ -2197,8 +2321,8 @@ def main():
                 
 
                 
-                # 2. Turn Zoom
-                st.header("2. Racing Line Comparison (Turn Zoom)")
+                # 3. Turn Zoom
+                st.header("3. Racing Line Comparison (Turn Zoom)")
                 st.info("Zoom into specific corners to compare driving lines.")
                 
                 if track_name == 'Barber':
@@ -2245,8 +2369,8 @@ def main():
                 else:
                     st.warning("Turn definitions not available for this track.")
                 
-                # 3. Coasting
-                st.header("3. Coasting Detection (Hesitation)")
+                # 4. Coasting
+                st.header("4. Coasting Detection")
                 st.info("Yellow dots indicate areas where the driver is **coasting** (Throttle < 5% AND Brake < 1 bar).")
                 
                 c3, c4 = st.columns(2)
