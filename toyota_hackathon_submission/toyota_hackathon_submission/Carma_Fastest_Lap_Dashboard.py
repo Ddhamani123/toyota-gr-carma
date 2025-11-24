@@ -25,7 +25,7 @@ TRACK_CONFIG = {
     'Barber': {
         'type': 'gps',
         'endurance_file': str(TOYOTA_GR_DIR / "barber" / "23_AnalysisEnduranceWithSections_Race 1_Anonymized.CSV"),
-        'telemetry_file': str(TOYOTA_GR_DIR / "barber" / "R1_barber_telemetry_data.csv"),
+        'telemetry_file': str(TOYOTA_GR_DIR / "barber" / "R1_barber_telemetry_fastest_lap.csv"),
         'telemetry_ref_file': str(DATA_DIR / "barber_reference_lap.csv"),
         'micro_sectors': [
             ('S1-a', 'IM1a_time'),
@@ -41,7 +41,7 @@ TRACK_CONFIG = {
     'COTA': {
         'type': 'pixel',
         'endurance_file': str(TOYOTA_GR_DIR / "COTA" / "Race 1" / "23_AnalysisEnduranceWithSections_Race 1_Anonymized.CSV"),
-        'telemetry_file': str(TOYOTA_GR_DIR / "COTA" / "Race 1" / "R1_cota_telemetry_data.csv"),
+        'telemetry_file': str(TOYOTA_GR_DIR / "COTA" / "Race 1" / "R1_cota_telemetry_fastest_lap.csv"),
         'micro_sectors': [
             ('S1-a (T1)', 'IM1a_time'),
             ('S1-b (T2-T7)', 'IM1_time'),
