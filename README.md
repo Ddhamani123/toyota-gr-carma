@@ -28,7 +28,7 @@ We used the Toyota GR Hackathon dataset:
   - COTA reference polyline (built manually)
   - Fastest-lap parquet files we generated for speed/load efficiency
 
-Because the raw telemetry files are huge (1–2 GB each), they live in external storage, not in the repo.
+Because the raw telemetry files are huge (1–2 GB each), the telemetry file was filtered only to include the fastest laps necessary.
 
 ---
 
@@ -51,3 +51,5 @@ Clone the repo:
 ```bash
 git clone https://github.com/Ddhamani123/toyota-gr-carma.git
 cd toyota-gr-carma
+streamlit run toyota-gr-carma/toyota_hackathon_submission/toyota_hackathon_submission/Carma_Fastest_Lap_Dashboard.py
+
