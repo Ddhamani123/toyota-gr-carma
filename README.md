@@ -37,7 +37,8 @@ Because the raw telemetry files are huge (1–2 GB each), the telemetry file was
 - Load endurance data → find fastest laps → compute sector and micro-sector deltas  
 - Build track centerlines (our own for Barber + COTA)  
 - Project telemetry onto a station-based coordinate system  
-- Generate ghost-car animation frames from telemetry  
+- Generate ghost-car animation frames from telemetry
+- Create driver-profiling features from telemetry (throttle, brake, lateral G, steering, consistency)
 - Plot everything in Streamlit with Plotly
 
 If you’re just running it, you don’t need to worry about any of the internals.
